@@ -1,4 +1,4 @@
-"""
+""
 AI Spreadsheet Analyst — Streamlit Application Entry Point
 ==========================================================
 
@@ -47,7 +47,6 @@ from services.file_service import (
 from services.kpi_service import generate_kpis, KPIResult
 from services.insight_service import generate_insights, generate_recommendations, Insight, Recommendation
 from services.report_service import generate_analyst_report, AnalystReport
-from services.excel_service import generate_analysis_workbook
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
 
@@ -449,7 +448,6 @@ def render_business_intelligence_center() -> None:
     _display_insights()
     _display_recommendations()
     _display_report()
-    _render_export_button()
 
 
 def _display_kpis() -> None:
@@ -614,48 +612,7 @@ def _display_report() -> None:
 # Dashboard Analytics Center
 # =============================================================================
 
-def _render_export_button() -> None:
-    """Render the Excel export download button for the analysis workbook."""
-    st.markdown("---")
-    st.markdown("### 📥 Export")
 
-    df = st.session_state.dataframe
-    if df is None:
-        return
-
-    kpis = st.session_state.get("bi_kpis")
-    insights = st.session_state.get("bi_insights")
-    recommendations = st.session_state.get("bi_recommendations")
-    report = st.session_state.get("bi_report")
-
-    has_analysis = any([
-        kpis is not None and len(kpis) > 0,
-        insights is not None and len(insights) > 0,
-        recommendations is not None and len(recommendations) > 0,
-        report is not None,
-    ])
-
-    if not has_analysis:
-        st.info("Generate KPIs, Insights, Recommendations, or an Analyst Report to enable export.")
-        return
-
-    if st.button("📥 Download Analysis Workbook", type="primary", use_container_width=True):
-        with st.spinner("Building workbook..."):
-            buffer = generate_analysis_workbook(
-                df=df, kpis=kpis, insights=insights,
-                recommendations=recommendations, report=report,
-            )
-            timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"analysis_workbook_{timestamp}.xlsx"
-
-            st.download_button(
-                label="⬇️ Click to Download",
-                data=buffer, file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-            log_action(action="Export Workbook", details=f"Exported '{filename}'", affected_rows=len(df))
 def render_dashboard_analytics_center() -> None:
     """Dashboard Analytics Center with Plotly visualizations."""
     st.subheader("Dashboard Analytics Center")
@@ -934,5 +891,4 @@ def main() -> None:
     render_main_content()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__m
