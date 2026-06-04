@@ -2,7 +2,7 @@
 AI Spreadsheet Analyst — Streamlit Application Entry Point
 ==========================================================
 
-Run with: streamlit run app.py
+Run with:  streamlit run app.py
 """
 
 from __future__ import annotations
@@ -32,9 +32,6 @@ from services.file_service import (
     get_file_metadata,
     load_dataframe_from_upload,
 )
-from services.kpi_service import generate_kpis, KPIResult
-from services.insight_service import generate_insights, generate_recommendations, Insight, Recommendation
-from services.report_service import generate_analyst_report, AnalystReport
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
 
@@ -59,10 +56,6 @@ def init_session_state() -> None:
         "quality_report_before": None,
         "quality_report_after": None,
         "upload_error": None,
-        "bi_kpis": None,
-        "bi_insights": None,
-        "bi_recommendations": None,
-        "bi_report": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -199,10 +192,6 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.quality_report_before = quality_before
         st.session_state.quality_report_after = quality_before
         st.session_state._last_upload_key = upload_key
-        st.session_state.bi_kpis = None
-        st.session_state.bi_insights = None
-        st.session_state.bi_recommendations = None
-        st.session_state.bi_report = None
 
         log_action(
             action="File Upload",
@@ -363,230 +352,6 @@ def render_data_cleaning_center() -> None:
             _apply_cleaning_operation("Clean Everything", clean_everything)
 
 
-def render_business_intelligence_center() -> None:
-    """Business Intelligence Center for KPIs, Insights, Recommendations, and Reports."""
-    st.subheader("Business Intelligence Center")
-    st.caption("Generate actionable intelligence from your dataset.")
-
-    df = st.session_state.dataframe
-    if df is None:
-        st.info("Upload a file to unlock Business Intelligence features.")
-        return
-
-    btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
-
-    with btn_col1:
-        if st.button("Generate KPIs", use_container_width=True):
-            with st.spinner("Analyzing metrics..."):
-                kpis = generate_kpis(df)
-                st.session_state.bi_kpis = kpis
-                log_action(
-                    action="Generate KPIs",
-                    details=f"Generated {len(kpis)} KPIs from dataset.",
-                    affected_rows=len(df),
-                )
-            st.success(f"{len(kpis)} KPIs generated.")
-
-    with btn_col2:
-        if st.button("Generate Insights", use_container_width=True):
-            with st.spinner("Detecting insights..."):
-                insights = generate_insights(df)
-                st.session_state.bi_insights = insights
-                log_action(
-                    action="Generate Insights",
-                    details=f"Generated {len(insights)} business insights.",
-                    affected_rows=len(df),
-                )
-            st.success(f"{len(insights)} insights generated.")
-
-    with btn_col3:
-        if st.button("Generate Recommendations", use_container_width=True):
-            with st.spinner("Building recommendations..."):
-                recommendations = generate_recommendations(df)
-                st.session_state.bi_recommendations = recommendations
-                log_action(
-                    action="Generate Recommendations",
-                    details=f"Generated {len(recommendations)} recommendations.",
-                    affected_rows=len(df),
-                )
-            st.success(f"{len(recommendations)} recommendations generated.")
-
-    with btn_col4:
-        if st.button("Generate Analyst Report", type="primary", use_container_width=True):
-            with st.spinner("Compiling analyst report..."):
-                report = generate_analyst_report(df)
-                st.session_state.bi_report = report
-                log_action(
-                    action="Generate Analyst Report",
-                    details="Full analyst report compiled with KPIs, insights, and recommendations.",
-                    affected_rows=len(df),
-                )
-            st.success("Analyst report ready.")
-
-    _display_kpis()
-    _display_insights()
-    _display_recommendations()
-    _display_report()
-
-
-def _display_kpis() -> None:
-    """Display generated KPIs as metric cards and detail table."""
-    kpis = st.session_state.get("bi_kpis")
-    if not kpis:
-        return
-
-    st.markdown("---")
-    st.markdown("### 📊 Key Performance Indicators")
-
-    cols = st.columns(min(len(kpis), 4))
-    for idx, kpi in enumerate(kpis):
-        with cols[idx % 4]:
-            st.metric(label=kpi.name, value=kpi.formatted_value)
-            st.caption(kpi.description)
-
-    with st.expander("KPI Detail Table", expanded=False):
-        kpi_data = [
-            {
-                "KPI": k.name,
-                "Value": k.formatted_value,
-                "Raw Value": k.value,
-                "Column": k.column_used or "—",
-                "Confidence": k.confidence,
-                "Description": k.description,
-            }
-            for k in kpis
-        ]
-        st.dataframe(pd.DataFrame(kpi_data), use_container_width=True, hide_index=True)
-
-
-def _display_insights() -> None:
-    """Display generated insights with severity icons and expanders."""
-    insights = st.session_state.get("bi_insights")
-    if not insights:
-        return
-
-    st.markdown("---")
-    st.markdown("### 💡 Key Insights")
-
-    for insight in insights:
-        severity_icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(
-            insight.severity, "ℹ️"
-        )
-        with st.expander(
-            f"{severity_icon} {insight.observation}",
-            expanded=(insight.severity == "critical"),
-        ):
-            st.markdown(f"**Evidence:** {insight.evidence}")
-            st.markdown(f"**Business Interpretation:** {insight.business_interpretation}")
-            st.markdown(f"**Category:** `{insight.category}` | **Severity:** `{insight.severity}`")
-
-
-def _display_recommendations() -> None:
-    """Display generated recommendations sorted by priority."""
-    recommendations = st.session_state.get("bi_recommendations")
-    if not recommendations:
-        return
-
-    st.markdown("---")
-    st.markdown("### 🎯 Recommendations")
-
-    priority_order = {"high": 0, "medium": 1, "low": 2}
-    sorted_recs = sorted(
-        recommendations, key=lambda r: priority_order.get(r.priority, 99)
-    )
-
-    for rec in sorted_recs:
-        priority_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(
-            rec.priority, "⚪"
-        )
-        with st.expander(
-            f"{priority_color} {rec.title} ({rec.priority.upper()})",
-            expanded=(rec.priority == "high"),
-        ):
-            st.markdown(f"**Description:** {rec.description}")
-            st.markdown(f"**Evidence:** {rec.evidence}")
-            st.markdown(f"**Action Category:** `{rec.action_category}`")
-
-
-def _display_report() -> None:
-    """Display the full structured analyst report."""
-    report = st.session_state.get("bi_report")
-    if not report:
-        return
-
-    st.markdown("---")
-    st.markdown("### 📋 Analyst Report")
-
-    st.markdown("#### Dataset Overview")
-    overview = report.dataset_overview
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rows", f"{overview['row_count']:,}")
-    c2.metric("Columns", overview["column_count"])
-    c3.metric("Memory", f"{overview['memory_usage_mb']} MB")
-    c4.metric("Total Columns", len(overview["column_names"]))
-
-    with st.expander("Column Names"):
-        st.write(", ".join(overview["column_names"]))
-
-    st.markdown("#### Data Quality Summary")
-    q = report.data_quality_summary
-    q1, q2, q3, q4 = st.columns(4)
-    q1.metric("Completeness Score", f"{q['completeness_score']}/100")
-    q2.metric("Missing Values", f"{q['missing_values']:,}")
-    q3.metric("Duplicate Rows", f"{q['duplicate_rows']:,}")
-    q4.metric("Empty Columns", q["empty_columns"])
-
-    if report.kpi_summary:
-        st.markdown("#### KPI Summary")
-        kpi_df = pd.DataFrame(
-            [
-                {"KPI": k.name, "Value": k.formatted_value, "Confidence": k.confidence}
-                for k in report.kpi_summary
-            ]
-        )
-        st.dataframe(kpi_df, use_container_width=True, hide_index=True)
-
-    if report.key_insights:
-        st.markdown("#### Key Insights")
-        for insight in report.key_insights:
-            severity_icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(
-                insight.severity, "ℹ️"
-            )
-            st.markdown(f"{severity_icon} **{insight.observation}**")
-            st.markdown(f"→ *Evidence:* {insight.evidence}")
-            st.markdown(f"→ *Interpretation:* {insight.business_interpretation}")
-            st.divider()
-
-    if report.recommendations:
-        st.markdown("#### Recommendations")
-        for rec in report.recommendations:
-            priority_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(
-                rec.priority, "⚪"
-            )
-            st.markdown(f"{priority_color} **{rec.title}** ({rec.priority.upper()})")
-            st.markdown(f"→ {rec.description}")
-            st.markdown(f"→ *Evidence:* {rec.evidence}")
-            st.divider()
-
-    if report.cleaning_actions:
-        st.markdown("#### Cleaning Actions Performed")
-        clean_df = pd.DataFrame(
-            [
-                {
-                    "Timestamp": a.get("timestamp", "—")[:19],
-                    "Action": a.get("action", "—"),
-                    "Details": a.get("details", "—"),
-                    "Affected": a.get("affected_rows", 0),
-                }
-                for a in report.cleaning_actions
-            ]
-        )
-        st.dataframe(clean_df, use_container_width=True, hide_index=True)
-
-    st.markdown("#### Analyst Notes")
-    st.info(report.analyst_notes)
-
-
 def render_main_content() -> None:
     """Render the main analysis area or an empty-state prompt."""
     df = st.session_state.dataframe
@@ -611,8 +376,6 @@ def render_main_content() -> None:
     render_data_cleaning_center()
     st.divider()
     render_basic_statistics(df)
-    st.divider()
-    render_business_intelligence_center()
 
 
 def main() -> None:
@@ -630,4 +393,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()  
+    main()
