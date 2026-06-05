@@ -48,7 +48,6 @@ from services.kpi_service import generate_kpis, KPIResult
 from services.insight_service import generate_insights, generate_recommendations, Insight, Recommendation
 from services.report_service import generate_analyst_report, AnalystReport
 from services.excel_service import generate_analysis_workbook
-from services.pivot_service import generate_pivot_table, get_recommended_pivot_fields, PivotServiceError
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
 
@@ -79,8 +78,6 @@ def init_session_state() -> None:
         "bi_report": None,
         "dashboard_charts": None,
         "dashboard_recommendations": None,
-        "pivot_recommendations": None,
-        "pivot_result": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -223,8 +220,6 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.bi_report = None
         st.session_state.dashboard_charts = None
         st.session_state.dashboard_recommendations = None
-        st.session_state.pivot_recommendations = None
-        st.session_state.pivot_result = None
 
         log_action(
             action="File Upload",
@@ -890,144 +885,6 @@ def _render_advanced_analytics_tab() -> None:
             st.info("No applicable charts were generated for this dataset.")
 
 
-
-
-# =============================================================================
-# Pivot Intelligence Center
-# =============================================================================
-
-
-def render_pivot_intelligence_center() -> None:
-    """Pivot Intelligence Center for interactive pivot table generation."""
-    st.subheader("Pivot Intelligence Center")
-    st.caption("Build custom pivot tables from your dataset.")
-
-    df = st.session_state.dataframe
-    if df is None:
-        st.info("Upload a file to unlock Pivot Intelligence features.")
-        return
-
-    recommendations = st.session_state.get("pivot_recommendations")
-    if recommendations is None:
-        recommendations = get_recommended_pivot_fields(df)
-        st.session_state.pivot_recommendations = recommendations
-
-    recs = recommendations
-    row_candidates = recs.get("row_candidates", [])
-    col_candidates = recs.get("col_candidates", [])
-    value_candidates = recs.get("value_candidates", [])
-
-    if not row_candidates or not value_candidates:
-        st.warning("This dataset does not have suitable fields for pivot analysis.")
-        return
-
-    st.markdown("#### Field Selection")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        row_field = st.selectbox(
-            "Row Field",
-            options=row_candidates,
-            index=0 if row_candidates else None,
-            help="Categorical field to group rows by",
-        )
-
-    with col2:
-        col_field = st.selectbox(
-            "Column Field (Optional)",
-            options=["None"] + col_candidates,
-            index=0,
-            help="Optional categorical field for column breakdown",
-        )
-
-    with col3:
-        value_field = st.selectbox(
-            "Value Field",
-            options=value_candidates,
-            index=0 if value_candidates else None,
-            help="Numeric field to aggregate",
-        )
-
-    with col4:
-        agg_function = st.selectbox(
-            "Aggregation",
-            options=["sum", "mean", "count", "min", "max"],
-            index=0,
-            help="How to aggregate the value field",
-        )
-
-    suggested = recs.get("suggested_combinations", [])
-    if suggested:
-        with st.expander("💡 Suggested Combinations", expanded=False):
-            for combo in suggested[:5]:
-                st.markdown(f"• **{combo['reason']}** — Rows: `{combo['rows'][0]}`, Values: `{combo['values'][0]}`, Agg: `{combo['agg']}`")
-
-    if st.button("Generate Pivot Table", type="primary", use_container_width=True):
-        with st.spinner("Building pivot table..."):
-            try:
-                rows = [row_field]
-                values = [value_field]
-                columns = [col_field] if col_field != "None" else None
-
-                result = generate_pivot_table(
-                    df=df,
-                    rows=rows,
-                    values=values,
-                    agg_function=agg_function,
-                    columns=columns,
-                )
-                st.session_state.pivot_result = result
-
-                log_action(
-                    action="Generate Pivot Table",
-                    details=result.message,
-                    affected_rows=len(df),
-                )
-                st.success(result.message)
-            except PivotServiceError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Unexpected error: {exc}")
-
-    _display_pivot_result()
-
-
-def _display_pivot_result() -> None:
-    """Display the generated pivot table with metrics and export option."""
-    result = st.session_state.get("pivot_result")
-    if not result:
-        return
-
-    st.markdown("---")
-    st.markdown("### 📊 Pivot Table Result")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", f"{result.shape[0]:,}")
-    c2.metric("Columns", result.shape[1])
-    c3.metric("Total Cells", f"{result.total_cells:,}")
-
-    config_parts = [
-        f"**Rows:** {', '.join(result.rows)}",
-        f"**Values:** {', '.join(result.values)}",
-        f"**Aggregation:** `{result.agg_function}`",
-    ]
-    if result.columns:
-        config_parts.insert(1, f"**Columns:** {', '.join(result.columns)}")
-    st.markdown(" | ".join(config_parts))
-
-    st.dataframe(result.pivot_table, use_container_width=True, hide_index=True)
-
-    csv = result.pivot_table.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="⬇️ Download Pivot Table as CSV",
-        data=csv,
-        file_name=f"pivot_table_{result.agg_function}_{'_'.join(result.rows)}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
 # =============================================================================
 # Main Content Renderer
 # =============================================================================
@@ -1061,8 +918,6 @@ def render_main_content() -> None:
     render_business_intelligence_center()
     st.divider()
     render_dashboard_analytics_center()
-    st.divider()
-    render_pivot_intelligence_center()
 
 
 def main() -> None:
