@@ -57,6 +57,12 @@ from services.formula_service import (
     supported_functions,
     validate_formula,
 )
+from services.comparison_service import (
+    ComparisonResult,
+    ComparisonServiceError,
+    analyze_datasets,
+    generate_comparison_workbook,
+)
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
 
@@ -90,6 +96,8 @@ def init_session_state() -> None:
         "pivot_recommendations": None,
         "pivot_result": None,
         "formula_history": [],
+        "comparison_dataframe": None,
+        "comparison_result": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -235,6 +243,9 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.pivot_recommendations = None
         st.session_state.pivot_result = None
         st.session_state.formula_history = []
+        st.session_state.comparison_dataframe = None
+        st.session_state.comparison_result = None
+        st.session_state._last_comparison_upload_key = None
 
         log_action(
             action="File Upload",
@@ -1131,6 +1142,163 @@ def _display_pivot_result() -> None:
 
 
 # =============================================================================
+# Multi-File Comparison Center
+# =============================================================================
+
+
+def render_multi_file_comparison_center() -> None:
+    """Multi-File Comparison Center for comparing two datasets."""
+    st.subheader("Multi-File Comparison Center")
+    st.caption("Upload a second dataset and compare it against the primary dataset.")
+
+    df_a = st.session_state.dataframe
+    if df_a is None:
+        st.info("Upload a primary file first to unlock Multi-File Comparison.")
+        return
+
+    st.markdown("#### Upload Comparison Dataset")
+    uploaded_b = st.file_uploader(
+        "Choose comparison spreadsheet",
+        type=["csv", "xlsx", "xls"],
+        key="comparison_file_uploader",
+        help="Supported formats: CSV, XLSX, XLS",
+    )
+
+    if uploaded_b is not None:
+        upload_key_b = f"{uploaded_b.name}_{uploaded_b.size}"
+        if st.session_state.get("_last_comparison_upload_key") != upload_key_b:
+            try:
+                content = uploaded_b.getvalue()
+                df_b, _saved_path, _validation = load_dataframe_from_upload(
+                    content, uploaded_b.name
+                )
+                st.session_state.comparison_dataframe = df_b
+                st.session_state._last_comparison_upload_key = upload_key_b
+                st.session_state.comparison_result = None
+                st.success(
+                    f"Loaded comparison file **{uploaded_b.name}** "
+                    f"({len(df_b):,} rows, {len(df_b.columns)} columns)."
+                )
+            except Exception as exc:
+                st.error(f"Failed to load comparison file: {exc}")
+                st.session_state.comparison_dataframe = None
+                st.session_state.comparison_result = None
+
+    df_b = st.session_state.get("comparison_dataframe")
+    if df_b is None:
+        st.info("Upload a comparison file to proceed.")
+        return
+
+    common_cols = list(set(df_a.columns) & set(df_b.columns))
+    if not common_cols:
+        st.error("No common columns found between the two datasets.")
+        return
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        join_key = st.selectbox(
+            "Select Join Key",
+            options=common_cols,
+            help="Column used to match records between datasets (must be unique).",
+        )
+    with col2:
+        if st.button("Run Comparison", type="primary", use_container_width=True):
+            with st.spinner("Running comparison..."):
+                try:
+                    result = analyze_datasets(df_a, df_b, join_key)
+                    st.session_state.comparison_result = result
+                    log_action(
+                        action="Run Comparison",
+                        details=(
+                            f"Compared using key '{join_key}'. "
+                            f"Added: {result.added_count}, "
+                            f"Removed: {result.removed_count}, "
+                            f"Modified: {result.modified_count}"
+                        ),
+                        affected_rows=max(result.dataset_a_rows, result.dataset_b_rows),
+                    )
+                    st.success("Comparison complete!")
+                except ComparisonServiceError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Comparison failed: {exc}")
+
+    result = st.session_state.get("comparison_result")
+    if result is None:
+        return
+
+    tabs = st.tabs(
+        ["Summary", "Added Records", "Removed Records", "Modified Records", "Numeric Differences"]
+    )
+
+    with tabs[0]:
+        st.markdown("### 📊 Comparison Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Dataset A Rows", f"{result.dataset_a_rows:,}")
+        c2.metric("Dataset B Rows", f"{result.dataset_b_rows:,}")
+        c3.metric("Matched Records", f"{result.matched_records:,}")
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Added Records", f"{result.added_count:,}")
+        c5.metric("Removed Records", f"{result.removed_count:,}")
+        c6.metric("Modified Records", f"{result.modified_count:,}")
+
+        st.markdown("---")
+        st.markdown(f"**Common Columns:** {result.summary.get('common_columns', 0)}")
+        st.markdown(f"**Numeric Columns Compared:** {result.summary.get('numeric_columns_compared', 0)}")
+
+    with tabs[1]:
+        st.markdown("### ➕ Added Records")
+        if result.added_records.empty:
+            st.info("No added records found.")
+        else:
+            st.dataframe(result.added_records, use_container_width=True, hide_index=True)
+            st.caption(f"{len(result.added_records):,} records present in Dataset B but not in Dataset A.")
+
+    with tabs[2]:
+        st.markdown("### ➖ Removed Records")
+        if result.removed_records.empty:
+            st.info("No removed records found.")
+        else:
+            st.dataframe(result.removed_records, use_container_width=True, hide_index=True)
+            st.caption(f"{len(result.removed_records):,} records present in Dataset A but not in Dataset B.")
+
+    with tabs[3]:
+        st.markdown("### ✏️ Modified Records")
+        if result.modified_records.empty:
+            st.info("No modified records found.")
+        else:
+            st.dataframe(result.modified_records, use_container_width=True, hide_index=True)
+            st.caption(f"{len(result.modified_records):,} field-level changes detected.")
+
+    with tabs[4]:
+        st.markdown("### 🔢 Numeric Differences")
+        if result.numeric_comparison.empty:
+            st.info("No common numeric columns to compare.")
+        else:
+            st.dataframe(result.numeric_comparison, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    if st.button("📥 Download Comparison Report", type="primary", use_container_width=True):
+        with st.spinner("Building comparison workbook..."):
+            buffer = generate_comparison_workbook(result)
+            timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"Comparison_Report_{timestamp}.xlsx"
+            st.download_button(
+                label="⬇️ Click to Download",
+                data=buffer,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+            log_action(
+                action="Export Comparison Report",
+                details=f"Exported '{filename}'",
+                affected_rows=result.dataset_a_rows + result.dataset_b_rows,
+            )
+
+
+# =============================================================================
 # Main Content Renderer
 # =============================================================================
 
@@ -1167,6 +1335,8 @@ def render_main_content() -> None:
     render_dashboard_analytics_center()
     st.divider()
     render_pivot_intelligence_center()
+    st.divider()
+    render_multi_file_comparison_center()
 
 
 def main() -> None:

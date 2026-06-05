@@ -49,6 +49,14 @@ from services.insight_service import generate_insights, generate_recommendations
 from services.report_service import generate_analyst_report, AnalystReport
 from services.excel_service import generate_analysis_workbook
 from services.pivot_service import generate_pivot_table, get_recommended_pivot_fields, PivotServiceError
+from services.formula_service import (
+    FormulaResult,
+    FormulaServiceError,
+    create_calculated_column,
+    extract_column_references,
+    supported_functions,
+    validate_formula,
+)
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
 
@@ -81,6 +89,7 @@ def init_session_state() -> None:
         "dashboard_recommendations": None,
         "pivot_recommendations": None,
         "pivot_result": None,
+        "formula_history": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -225,6 +234,7 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.dashboard_recommendations = None
         st.session_state.pivot_recommendations = None
         st.session_state.pivot_result = None
+        st.session_state.formula_history = []
 
         log_action(
             action="File Upload",
@@ -383,6 +393,98 @@ def render_data_cleaning_center() -> None:
             _apply_cleaning_operation("Remove Empty Columns", remove_empty_columns)
         if st.button("Clean Everything", type="primary", use_container_width=True):
             _apply_cleaning_operation("Clean Everything", clean_everything)
+
+
+# =============================================================================
+# Formula Intelligence Center
+# =============================================================================
+
+
+def render_formula_intelligence_center() -> None:
+    """Formula Intelligence Center for creating calculated columns."""
+    st.subheader("Formula Intelligence Center")
+    st.caption("Create calculated columns using arithmetic expressions with existing column names.")
+
+    df = st.session_state.dataframe
+    if df is None:
+        st.info("Upload a file to unlock Formula Intelligence features.")
+        return
+
+    with st.expander("📖 Supported Syntax (Version 1)", expanded=False):
+        st.markdown("**Arithmetic Operators:** `+`  `-`  `*`  `/`  `**`  `%`  `()`")
+        st.markdown("**Constants:** Numeric literals (e.g., `0.18`)")
+        st.markdown("**References:** Use exact column names (case-sensitive).")
+        st.markdown("**Examples:**")
+        st.markdown("- `Quantity * Price`")
+        st.markdown("- `Revenue - Cost`")
+        st.markdown("- `(Revenue - Cost) / Revenue`")
+        st.markdown("- `Revenue * 0.18`")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        new_col_name = st.text_input("New Column Name", placeholder="e.g., Revenue")
+    with col2:
+        formula_input = st.text_input("Formula", placeholder="e.g., Quantity * Price")
+
+    btn_col1, btn_col2 = st.columns([1, 1])
+    with btn_col1:
+        if st.button("Validate Formula", use_container_width=True):
+            if not formula_input:
+                st.warning("Enter a formula to validate.")
+            else:
+                try:
+                    is_valid, msg = validate_formula(formula_input, df.columns.tolist())
+                    if is_valid:
+                        refs = extract_column_references(formula_input)
+                        st.success(f"Formula is valid. References columns: {', '.join(refs)}")
+                    else:
+                        st.error(msg)
+                except FormulaServiceError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Validation failed: {exc}")
+
+    with btn_col2:
+        if st.button("Create Column", type="primary", use_container_width=True):
+            if not new_col_name or not formula_input:
+                st.warning("Enter both a column name and a formula.")
+            elif new_col_name in df.columns:
+                st.error(f"Column '{new_col_name}' already exists. Choose a different name.")
+            else:
+                try:
+                    result = create_calculated_column(df, new_col_name, formula_input)
+                    _refresh_dataset_state(result.dataframe)
+
+                    st.session_state.formula_history.append({
+                        "timestamp": pd.Timestamp.now().isoformat(),
+                        "column_name": result.new_column,
+                        "formula": result.formula,
+                        "affected_rows": result.affected_rows,
+                    })
+
+                    log_action(
+                        action="Create Calculated Column",
+                        details=f"Created '{result.new_column}' = {result.formula}",
+                        affected_rows=result.affected_rows,
+                    )
+                    st.success(
+                        f"Column '{result.new_column}' created successfully. "
+                        f"Affected rows: {result.affected_rows:,}"
+                    )
+                except FormulaServiceError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Failed to create column: {exc}")
+
+    history = st.session_state.get("formula_history", [])
+    if history:
+        st.markdown("---")
+        st.markdown("### 🧮 Formula History")
+        for entry in reversed(history[-10:]):
+            st.markdown(
+                f"**{entry['column_name']}** = `{entry['formula']}` "
+                f"· {entry['timestamp'][:19]} · Affected: {entry['affected_rows']:,}"
+            )
 
 
 # =============================================================================
@@ -1055,6 +1157,8 @@ def render_main_content() -> None:
     render_data_quality_report()
     st.divider()
     render_data_cleaning_center()
+    st.divider()
+    render_formula_intelligence_center()
     st.divider()
     render_basic_statistics(df)
     st.divider()
