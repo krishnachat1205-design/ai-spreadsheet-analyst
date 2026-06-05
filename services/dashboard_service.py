@@ -1,9 +1,9 @@
-""
+"""
 Dashboard Service
 =================
 
 Production-ready Plotly-based analytics and visualization generation.
-Provides chart generation, column detection, and chart recommendation logic.
+Optimized for large datasets with sampling, limits, and lazy loading.
 """
 
 from __future__ import annotations
@@ -20,6 +20,20 @@ from plotly.subplots import make_subplots
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# Performance Constants
+# =============================================================================
+
+MAX_HISTOGRAMS = 5
+MAX_BOXPLOTS = 5
+MAX_SCATTER_PLOTS = 3
+MAX_PIE_CHARTS = 5
+MAX_BAR_CHARTS = 5
+MAX_SCATTER_SAMPLE = 3000
+MAX_HISTOGRAM_SAMPLE = 5000
+MAX_CORR_SAMPLE = 10000
+LARGE_DATASET_THRESHOLD = 20000
+
 
 @dataclass
 class ChartResult:
@@ -35,6 +49,18 @@ class ChartResult:
 
 class DashboardServiceError(Exception):
     """Raised when chart generation fails."""
+
+
+def _is_large_dataset(df: pd.DataFrame) -> bool:
+    """Check if dataset exceeds the large dataset threshold."""
+    return len(df) > LARGE_DATASET_THRESHOLD
+
+
+def _sample_for_correlation(df: pd.DataFrame, numeric_cols: list[str]) -> pd.DataFrame:
+    """Sample dataframe for correlation if it exceeds threshold."""
+    if len(df) > MAX_CORR_SAMPLE:
+        return df[numeric_cols].sample(MAX_CORR_SAMPLE, random_state=42)
+    return df[numeric_cols]
 
 
 def detect_column_types(df: pd.DataFrame) -> dict[str, list[str]]:
@@ -237,6 +263,7 @@ def generate_numeric_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
 def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
     """
     Generate histograms and box plots for numeric columns.
+    Limited to MAX_HISTOGRAMS histograms and MAX_BOXPLOTS box plots.
     """
     results: list[ChartResult] = []
     col_types = detect_column_types(df)
@@ -255,12 +282,16 @@ def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
         )
         return results
 
-    # Histograms for first 3 numeric columns
-    for col in numeric_cols[:3]:
+    # Histograms for up to MAX_HISTOGRAMS numeric columns
+    for col in numeric_cols[:MAX_HISTOGRAMS]:
         try:
             series = df[col].dropna()
             if series.empty:
                 continue
+
+            # Sample for histogram if dataset is large
+            if len(series) > MAX_HISTOGRAM_SAMPLE:
+                series = series.sample(MAX_HISTOGRAM_SAMPLE, random_state=42)
 
             fig = go.Figure(
                 data=[
@@ -289,9 +320,9 @@ def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
         except Exception as exc:
             logger.warning("Histogram for %s failed: %s", col, exc)
 
-    # Box plot for all numeric columns (up to 8)
+    # Box plot for up to MAX_BOXPLOTS numeric columns
     try:
-        subset_cols = numeric_cols[:8]
+        subset_cols = numeric_cols[:MAX_BOXPLOTS]
         subset_df = df[subset_cols].dropna(how="all")
         if not subset_df.empty and len(subset_cols) > 0:
             fig = go.Figure()
@@ -329,6 +360,7 @@ def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
 def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
     """
     Generate pie charts and bar charts for categorical columns.
+    Limited to MAX_PIE_CHARTS pie charts and MAX_BAR_CHARTS bar charts.
     """
     results: list[ChartResult] = []
     col_types = detect_column_types(df)
@@ -347,8 +379,8 @@ def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
         )
         return results
 
-    # Pie charts for first 2 categorical columns
-    for col in categorical_cols[:2]:
+    # Pie charts for up to MAX_PIE_CHARTS categorical columns
+    for col in categorical_cols[:MAX_PIE_CHARTS]:
         try:
             counts = df[col].value_counts().head(10)
             if counts.empty:
@@ -382,8 +414,8 @@ def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
         except Exception as exc:
             logger.warning("Pie chart for %s failed: %s", col, exc)
 
-    # Bar charts for first 3 categorical columns
-    for col in categorical_cols[:3]:
+    # Bar charts for up to MAX_BAR_CHARTS categorical columns
+    for col in categorical_cols[:MAX_BAR_CHARTS]:
         try:
             counts = df[col].value_counts().head(15)
             if counts.empty:
@@ -426,6 +458,7 @@ def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
 def generate_correlation_heatmap(df: pd.DataFrame) -> ChartResult:
     """
     Generate a correlation heatmap for all numeric columns.
+    Uses sampling if dataset exceeds MAX_CORR_SAMPLE rows.
     """
     col_types = detect_column_types(df)
     numeric_cols = col_types["numeric"]
@@ -441,7 +474,8 @@ def generate_correlation_heatmap(df: pd.DataFrame) -> ChartResult:
         )
 
     try:
-        corr_matrix = df[numeric_cols].corr().round(2)
+        corr_df = _sample_for_correlation(df, numeric_cols)
+        corr_matrix = corr_df.corr().round(2)
 
         fig = go.Figure(
             data=go.Heatmap(
@@ -483,6 +517,7 @@ def generate_correlation_heatmap(df: pd.DataFrame) -> ChartResult:
 def generate_scatter_plots(df: pd.DataFrame) -> list[ChartResult]:
     """
     Generate scatter plots for pairs of numeric columns.
+    Limited to MAX_SCATTER_PLOTS plots with MAX_SCATTER_SAMPLE rows.
     """
     results: list[ChartResult] = []
     col_types = detect_column_types(df)
@@ -502,14 +537,14 @@ def generate_scatter_plots(df: pd.DataFrame) -> list[ChartResult]:
         )
         return results
 
-    # Generate scatter for first 3 pairs
+    # Generate scatter for up to MAX_SCATTER_PLOTS pairs
     pairs = []
     for i in range(min(len(numeric_cols), 4)):
         for j in range(i + 1, min(len(numeric_cols), 4)):
             pairs.append((numeric_cols[i], numeric_cols[j]))
-            if len(pairs) >= 3:
+            if len(pairs) >= MAX_SCATTER_PLOTS:
                 break
-        if len(pairs) >= 3:
+        if len(pairs) >= MAX_SCATTER_PLOTS:
             break
 
     color_col = categorical_cols[0] if categorical_cols else None
@@ -524,8 +559,8 @@ def generate_scatter_plots(df: pd.DataFrame) -> list[ChartResult]:
                 continue
 
             # Sample large datasets
-            if len(plot_df) > 5000:
-                plot_df = plot_df.sample(5000, random_state=42)
+            if len(plot_df) > MAX_SCATTER_SAMPLE:
+                plot_df = plot_df.sample(MAX_SCATTER_SAMPLE, random_state=42)
 
             fig = px.scatter(
                 plot_df,
@@ -759,13 +794,43 @@ def recommend_best_charts(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 # =============================================================================
-# G. Convenience: Generate All Charts
+# G. Lazy Loading: Per-Tab Chart Generation
+# =============================================================================
+
+
+def generate_overview_charts(df: pd.DataFrame) -> list[ChartResult]:
+    """Generate only overview tab charts (numeric summaries)."""
+    return generate_numeric_summary_charts(df)
+
+
+def generate_trends_charts(df: pd.DataFrame) -> list[ChartResult]:
+    """Generate only trends tab charts (distributions)."""
+    return generate_distribution_charts(df)
+
+
+def generate_categories_charts(df: pd.DataFrame) -> list[ChartResult]:
+    """Generate only categories tab charts (categorical + top-n)."""
+    cat_charts = generate_categorical_summary_charts(df)
+    top_n_charts = generate_top_n_charts(df)
+    return cat_charts + top_n_charts
+
+
+def generate_relationships_charts(df: pd.DataFrame) -> list[ChartResult]:
+    """Generate only relationships tab charts (heatmap + scatter)."""
+    heatmap = generate_correlation_heatmap(df)
+    scatters = generate_scatter_plots(df)
+    return [heatmap] + scatters
+
+
+# =============================================================================
+# H. Convenience: Generate All Charts (kept for backward compatibility)
 # =============================================================================
 
 
 def generate_all_charts(df: pd.DataFrame) -> dict[str, list[ChartResult]]:
     """
     Generate all available chart groups in one call.
+    NOTE: For large datasets, prefer per-tab lazy loading functions above.
 
     Returns dict with keys: numeric_summary, distribution, categorical, relationships, top_n.
     """
