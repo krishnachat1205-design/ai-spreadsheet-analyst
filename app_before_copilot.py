@@ -8,11 +8,6 @@ Run with: streamlit run app.py
 from __future__ import annotations
 
 import logging
-import os
-from dotenv import load_dotenv
-
-from collections.abc import Callable
-from typing import Any
 from collections.abc import Callable
 from typing import Any
 
@@ -68,16 +63,8 @@ from services.comparison_service import (
     analyze_datasets,
     generate_comparison_workbook,
 )
-from services.copilot_service import (
-    CopilotServiceError,
-    ask_copilot,
-    build_full_context,
-    generate_analysis_questions,
-    generate_executive_summary,
-)
 from utils.exceptions import FileLoadError, FileServiceError, FileValidationError
 from utils.helpers import compute_dataset_health, preview_dataframe
-load_dotenv()
 
 
 def configure_page() -> None:
@@ -111,10 +98,6 @@ def init_session_state() -> None:
         "formula_history": [],
         "comparison_dataframe": None,
         "comparison_result": None,
-        "copilot_history": [],
-        "copilot_last_response": None,
-        "copilot_executive_summary": None,
-        "copilot_suggestions": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -263,10 +246,6 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.comparison_dataframe = None
         st.session_state.comparison_result = None
         st.session_state._last_comparison_upload_key = None
-        st.session_state.copilot_history = []
-        st.session_state.copilot_last_response = None
-        st.session_state.copilot_executive_summary = None
-        st.session_state.copilot_suggestions = None
 
         log_action(
             action="File Upload",
@@ -1320,228 +1299,6 @@ def render_multi_file_comparison_center() -> None:
 
 
 # =============================================================================
-# AI Business Analyst Copilot
-# =============================================================================
-
-
-def render_ai_business_analyst_copilot() -> None:
-    """AI Business Analyst Copilot powered by Gemini."""
-    st.subheader("🤖 AI Business Analyst Copilot")
-    st.caption("Ask questions, generate executive summaries, and get AI-powered analysis suggestions.")
-
-    df = st.session_state.dataframe
-    if df is None:
-        st.info("Upload a file to unlock the AI Business Analyst Copilot.")
-        return
-
-    # API key check
-    if not os.getenv("GEMINI_API_KEY"):
-        st.warning("🔑 **GEMINI_API_KEY not configured.**")
-        st.markdown(
-            "Set the `GEMINI_API_KEY` environment variable and refresh the page to enable AI features. "
-            "All other platform features remain fully functional."
-        )
-        return
-
-    tabs = st.tabs(["💬 Ask Copilot", "📋 Executive Summary", "💡 Suggested Analysis"])
-
-    with tabs[0]:
-        _render_ask_copilot_tab()
-
-    with tabs[1]:
-        _render_executive_summary_tab()
-
-    with tabs[2]:
-        _render_suggested_analysis_tab()
-
-
-def _build_copilot_context() -> str:
-    """Build the full dataset context for the copilot from session state."""
-    df = st.session_state.dataframe
-    return build_full_context(
-        df=df,
-        metadata=st.session_state.get("file_metadata"),
-        health=st.session_state.get("dataset_health"),
-        quality_report=st.session_state.get("quality_report_after"),
-        kpis=st.session_state.get("bi_kpis"),
-        insights=st.session_state.get("bi_insights"),
-        recommendations=st.session_state.get("bi_recommendations"),
-        report=st.session_state.get("bi_report"),
-        charts=st.session_state.get("dashboard_charts"),
-        chart_recommendations=st.session_state.get("dashboard_recommendations"),
-        pivot_result=st.session_state.get("pivot_result"),
-        comparison_result=st.session_state.get("comparison_result"),
-        formula_history=st.session_state.get("formula_history"),
-    )
-
-
-def _render_ask_copilot_tab() -> None:
-    """Render the interactive Q&A tab."""
-    st.markdown("### 💬 Ask Copilot")
-    st.caption(
-        "Ask any business or data analysis question. The AI uses your dataset, KPIs, insights, "
-        "reports, and comparisons to answer."
-    )
-
-    context = _build_copilot_context()
-
-    question = st.text_area(
-        "Your question",
-        placeholder=(
-            "e.g., What are the key risks in this dataset? "
-            "What charts should I create? "
-            "How do I calculate profit margin? "
-            "What changed between the files?"
-        ),
-        height=100,
-    )
-
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        ask_clicked = st.button("Ask Copilot", type="primary", use_container_width=True)
-    with col2:
-        if st.button("Clear History", use_container_width=True):
-            st.session_state.copilot_history = []
-            st.session_state.copilot_last_response = None
-            st.rerun()
-
-    if ask_clicked:
-        if not question or not question.strip():
-            st.warning("Please enter a question.")
-        else:
-            with st.spinner("Consulting AI Business Analyst..."):
-                try:
-                    history = st.session_state.get("copilot_history", [])
-                    response = ask_copilot(
-                        question=question.strip(),
-                        full_context=context,
-                        history=history,
-                    )
-                    st.session_state.copilot_last_response = response
-
-                    history.append({
-                        "question": question.strip(),
-                        "answer": response.answer,
-                        "timestamp": pd.Timestamp.now().isoformat(),
-                    })
-                    st.session_state.copilot_history = history
-
-                    log_action(
-                        action="Copilot Question",
-                        details=f"Q: {question[:120]}",
-                        affected_rows=0,
-                    )
-                    st.success("Response received!")
-                except CopilotServiceError as exc:
-                    st.error(str(exc))
-                except Exception as exc:
-                    st.error(f"Copilot error: {exc}")
-
-    # Display last response
-    response = st.session_state.get("copilot_last_response")
-    if response:
-        st.markdown("---")
-        st.markdown("#### 🤖 Copilot Response")
-        st.markdown(response.answer)
-
-        if response.suggested_actions:
-            st.markdown("**Suggested Actions:**")
-            for action in response.suggested_actions:
-                st.markdown(f"- {action}")
-
-    # Conversation history
-    history = st.session_state.get("copilot_history", [])
-    if len(history) > 1:
-        st.markdown("---")
-        st.markdown("#### 📝 Conversation History")
-        for entry in reversed(history[:-1]):
-            with st.expander(f"Q: {entry['question'][:60]}...", expanded=False):
-                st.markdown(f"**Q:** {entry['question']}")
-                st.markdown(f"**A:** {entry['answer']}")
-                st.caption(f"{entry.get('timestamp', '')[:19]}")
-
-
-def _render_executive_summary_tab() -> None:
-    """Render the executive summary generation tab."""
-    st.markdown("### 📋 Executive Summary")
-    st.caption("Generate a comprehensive executive summary based on all available analysis.")
-
-    if st.button("Generate Executive Summary", type="primary", use_container_width=True):
-        with st.spinner("Generating executive summary with Gemini..."):
-            try:
-                context = _build_copilot_context()
-                response = generate_executive_summary(full_context=context)
-                st.session_state.copilot_executive_summary = response
-
-                log_action(
-                    action="Generate Executive Summary",
-                    details="AI-generated executive summary via Gemini",
-                    affected_rows=0,
-                )
-                st.success("Executive summary generated!")
-            except CopilotServiceError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Failed to generate summary: {exc}")
-
-    summary = st.session_state.get("copilot_executive_summary")
-    if summary:
-        st.markdown("---")
-        st.markdown(summary.answer)
-
-
-def _render_suggested_analysis_tab() -> None:
-    """Render the suggested analysis tab."""
-    st.markdown("### 💡 Suggested Analysis")
-    st.caption("AI-generated suggestions for questions, charts, pivot tables, and formulas.")
-
-    if st.button("Generate Suggestions", type="primary", use_container_width=True):
-        with st.spinner("Analyzing dataset for suggestions..."):
-            try:
-                context = _build_copilot_context()
-                suggestions = generate_analysis_questions(full_context=context)
-                st.session_state.copilot_suggestions = suggestions
-
-                log_action(
-                    action="Generate Analysis Suggestions",
-                    details="AI-generated analysis suggestions via Gemini",
-                    affected_rows=0,
-                )
-                st.success("Suggestions generated!")
-            except CopilotServiceError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Failed to generate suggestions: {exc}")
-
-    suggestions = st.session_state.get("copilot_suggestions")
-    if suggestions:
-        st.markdown("---")
-
-        if suggestions.get("questions"):
-            st.markdown("#### ❓ Suggested Questions")
-            for q in suggestions["questions"]:
-                st.markdown(f"- {q}")
-            st.markdown("")
-
-        if suggestions.get("charts"):
-            st.markdown("#### 📊 Suggested Charts")
-            for c in suggestions["charts"]:
-                st.markdown(f"- {c}")
-            st.markdown("")
-
-        if suggestions.get("pivots"):
-            st.markdown("#### 🔄 Suggested Pivot Tables")
-            for p in suggestions["pivots"]:
-                st.markdown(f"- {p}")
-            st.markdown("")
-
-        if suggestions.get("formulas"):
-            st.markdown("#### 🧮 Suggested Formulas")
-            for f in suggestions["formulas"]:
-                st.markdown(f"- {f}")
-
-
-# =============================================================================
 # Main Content Renderer
 # =============================================================================
 
@@ -1580,8 +1337,6 @@ def render_main_content() -> None:
     render_pivot_intelligence_center()
     st.divider()
     render_multi_file_comparison_center()
-    st.divider()
-    render_ai_business_analyst_copilot()
 
 
 def main() -> None:
