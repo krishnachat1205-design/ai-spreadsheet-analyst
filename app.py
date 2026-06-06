@@ -123,6 +123,11 @@ def init_session_state() -> None:
 
 def _refresh_dataset_state(df: pd.DataFrame) -> None:
     """Sync derived session state after the working DataFrame changes."""
+    old_df = st.session_state.get("dataframe")
+    if old_df is not None and set(old_df.columns) != set(df.columns):
+        st.session_state.pivot_recommendations = None
+        st.session_state.pivot_result = None
+
     st.session_state.dataframe = df
     st.session_state.dataset_health = compute_dataset_health(df)
     st.session_state.quality_report_after = generate_data_quality_report(df)
