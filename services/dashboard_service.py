@@ -33,7 +33,45 @@ MAX_SCATTER_SAMPLE = 3000
 MAX_HISTOGRAM_SAMPLE = 5000
 MAX_CORR_SAMPLE = 10000
 LARGE_DATASET_THRESHOLD = 20000
+VERY_LARGE_DATASET_THRESHOLD = 50000
 
+
+# =============================================================================
+# Dataset Tier Helpers
+# =============================================================================
+
+def get_dataset_size_tier(df: pd.DataFrame) -> str:
+    """Classify dataset size for adaptive visualization behavior."""
+    n = len(df)
+    if n > VERY_LARGE_DATASET_THRESHOLD:
+        return "very_large"
+    if n > LARGE_DATASET_THRESHOLD:
+        return "large"
+    return "normal"
+
+
+def _adaptive_sample_size(df: pd.DataFrame, base_limit: int) -> int:
+    """Reduce sample sizes aggressively for large datasets."""
+    tier = get_dataset_size_tier(df)
+    if tier == "very_large":
+        return min(base_limit // 5, 2000)
+    if tier == "large":
+        return min(base_limit // 2, 5000)
+    return base_limit
+
+
+def _limit_numeric_cols_for_corr(df: pd.DataFrame, numeric_cols: list[str], max_cols: int = 15) -> list[str]:
+    """Return the most variable numeric columns when too many exist."""
+    if len(numeric_cols) <= max_cols:
+        return numeric_cols
+    try:
+        variances = df[numeric_cols].var().sort_values(ascending=False)
+        return variances.head(max_cols).index.tolist()
+    except Exception:
+        return numeric_cols[:max_cols]
+
+
+# =============================================================================
 
 @dataclass
 class ChartResult:
@@ -58,8 +96,9 @@ def _is_large_dataset(df: pd.DataFrame) -> bool:
 
 def _sample_for_correlation(df: pd.DataFrame, numeric_cols: list[str]) -> pd.DataFrame:
     """Sample dataframe for correlation if it exceeds threshold."""
-    if len(df) > MAX_CORR_SAMPLE:
-        return df[numeric_cols].sample(MAX_CORR_SAMPLE, random_state=42)
+    limit = _adaptive_sample_size(df, MAX_CORR_SAMPLE)
+    if len(df) > limit:
+        return df[numeric_cols].sample(limit, random_state=42)
     return df[numeric_cols]
 
 
@@ -282,16 +321,23 @@ def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
         )
         return results
 
-    # Histograms for up to MAX_HISTOGRAMS numeric columns
-    for col in numeric_cols[:MAX_HISTOGRAMS]:
+    tier = get_dataset_size_tier(df)
+
+    # Adaptive limits
+    max_histograms = 1 if tier == "very_large" else (2 if tier == "large" else MAX_HISTOGRAMS)
+    max_boxplots = 1 if tier == "very_large" else (2 if tier == "large" else MAX_BOXPLOTS)
+    max_hist_sample = _adaptive_sample_size(df, MAX_HISTOGRAM_SAMPLE)
+
+    # Histograms for up to max_histograms numeric columns
+    for col in numeric_cols[:max_histograms]:
         try:
             series = df[col].dropna()
             if series.empty:
                 continue
 
             # Sample for histogram if dataset is large
-            if len(series) > MAX_HISTOGRAM_SAMPLE:
-                series = series.sample(MAX_HISTOGRAM_SAMPLE, random_state=42)
+            if len(series) > max_hist_sample:
+                series = series.sample(max_hist_sample, random_state=42)
 
             fig = go.Figure(
                 data=[
@@ -320,9 +366,9 @@ def generate_distribution_charts(df: pd.DataFrame) -> list[ChartResult]:
         except Exception as exc:
             logger.warning("Histogram for %s failed: %s", col, exc)
 
-    # Box plot for up to MAX_BOXPLOTS numeric columns
+    # Box plot for up to max_boxplots numeric columns
     try:
-        subset_cols = numeric_cols[:MAX_BOXPLOTS]
+        subset_cols = numeric_cols[:max_boxplots]
         subset_df = df[subset_cols].dropna(how="all")
         if not subset_df.empty and len(subset_cols) > 0:
             fig = go.Figure()
@@ -379,8 +425,12 @@ def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
         )
         return results
 
-    # Pie charts for up to MAX_PIE_CHARTS categorical columns
-    for col in categorical_cols[:MAX_PIE_CHARTS]:
+    tier = get_dataset_size_tier(df)
+    max_pie = 2 if tier == "very_large" else (3 if tier == "large" else MAX_PIE_CHARTS)
+    max_bar = 2 if tier == "very_large" else (3 if tier == "large" else MAX_BAR_CHARTS)
+
+    # Pie charts for up to max_pie categorical columns
+    for col in categorical_cols[:max_pie]:
         try:
             counts = df[col].value_counts().head(10)
             if counts.empty:
@@ -414,8 +464,8 @@ def generate_categorical_summary_charts(df: pd.DataFrame) -> list[ChartResult]:
         except Exception as exc:
             logger.warning("Pie chart for %s failed: %s", col, exc)
 
-    # Bar charts for up to MAX_BAR_CHARTS categorical columns
-    for col in categorical_cols[:MAX_BAR_CHARTS]:
+    # Bar charts for up to max_bar categorical columns
+    for col in categorical_cols[:max_bar]:
         try:
             counts = df[col].value_counts().head(15)
             if counts.empty:
@@ -473,6 +523,12 @@ def generate_correlation_heatmap(df: pd.DataFrame) -> ChartResult:
             applicable=False,
         )
 
+    tier = get_dataset_size_tier(df)
+
+    # For very large datasets with many numeric columns, limit to the most variable ones
+    if tier == "very_large" and len(numeric_cols) > 15:
+        numeric_cols = _limit_numeric_cols_for_corr(df, numeric_cols, max_cols=15)
+
     try:
         corr_df = _sample_for_correlation(df, numeric_cols)
         corr_matrix = corr_df.corr().round(2)
@@ -524,8 +580,23 @@ def generate_scatter_plots(df: pd.DataFrame) -> list[ChartResult]:
     numeric_cols = col_types["numeric"]
     categorical_cols = col_types["categorical"]
 
+    tier = get_dataset_size_tier(df)
+
+    # Very large datasets: skip scatter entirely to avoid browser / compute freeze
+    if tier == "very_large":
+        return [
+            ChartResult(
+                title="Scatter Plots",
+                figure=_safe_figure("Scatter Plots — Disabled for Very Large Datasets"),
+                chart_type="scatter",
+                columns_used=numeric_cols,
+                description="Scatter plots are disabled for datasets over 50,000 rows to maintain performance.",
+                applicable=False,
+            )
+        ]
+
     if len(numeric_cols) < 2:
-        results.append(
+        return [
             ChartResult(
                 title="Scatter Plots",
                 figure=_safe_figure("Scatter — Need 2+ numeric columns"),
@@ -534,33 +605,35 @@ def generate_scatter_plots(df: pd.DataFrame) -> list[ChartResult]:
                 description="At least 2 numeric columns required for scatter plots.",
                 applicable=False,
             )
-        )
-        return results
+        ]
 
-    # Generate scatter for up to MAX_SCATTER_PLOTS pairs
+    # Adaptive limits
+    max_plots = 1 if tier == "large" else MAX_SCATTER_PLOTS
+    max_sample = 1000 if tier == "large" else MAX_SCATTER_SAMPLE
+
+    # Generate scatter for up to max_plots pairs
     pairs = []
     for i in range(min(len(numeric_cols), 4)):
         for j in range(i + 1, min(len(numeric_cols), 4)):
             pairs.append((numeric_cols[i], numeric_cols[j]))
-            if len(pairs) >= MAX_SCATTER_PLOTS:
+            if len(pairs) >= max_plots:
                 break
-        if len(pairs) >= MAX_SCATTER_PLOTS:
+        if len(pairs) >= max_plots:
             break
 
     color_col = categorical_cols[0] if categorical_cols else None
 
     for x_col, y_col in pairs:
         try:
-            plot_df = df[[x_col, y_col]].copy().dropna()
+            cols = [x_col, y_col]
             if color_col and color_col in df.columns:
-                plot_df[color_col] = df.loc[plot_df.index, color_col]
+                cols.append(color_col)
+
+            # Sample FIRST, then dropna — much faster for large datasets
+            plot_df = df[cols].sample(min(max_sample, len(df)), random_state=42).dropna()
 
             if len(plot_df) < 2:
                 continue
-
-            # Sample large datasets
-            if len(plot_df) > MAX_SCATTER_SAMPLE:
-                plot_df = plot_df.sample(MAX_SCATTER_SAMPLE, random_state=42)
 
             fig = px.scatter(
                 plot_df,

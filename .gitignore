@@ -56,3 +56,4 @@ logs/
 # Jupyter
 .ipynb_checkpoints/
 .env
+backup

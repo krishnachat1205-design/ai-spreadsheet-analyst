@@ -37,13 +37,18 @@ from services.cleaning_service import (
 from services.dashboard_service import (
     detect_column_types,
     generate_all_charts,
+    generate_categories_charts,
     generate_categorical_summary_charts,
     generate_correlation_heatmap,
     generate_distribution_charts,
     generate_numeric_summary_charts,
+    generate_overview_charts,
+    generate_relationships_charts,
     generate_scatter_plots,
     generate_top_n_charts,
+    generate_trends_charts,
     recommend_best_charts,
+
 )
 from services.file_service import (
     get_file_metadata,
@@ -115,10 +120,64 @@ def init_session_state() -> None:
         "copilot_last_response": None,
         "copilot_executive_summary": None,
         "copilot_suggestions": None,
+        # Dashboard caching
+        "dashboard_cache_version": 0,
+        "dashboard_charts_overview": None,
+        "dashboard_charts_trends": None,
+        "dashboard_charts_categories": None,
+        "dashboard_charts_top_n": None,
+        "dashboard_charts_relationships_heatmap": None,
+        "dashboard_charts_relationships_scatter": None,
+        "dashboard_relationships_generated": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def _invalidate_dashboard_cache() -> None:
+    """Invalidate all dashboard chart caches and bump the version counter."""
+    st.session_state.dashboard_cache_version = st.session_state.get("dashboard_cache_version", 0) + 1
+    st.session_state.dashboard_charts_overview = None
+    st.session_state.dashboard_charts_trends = None
+    st.session_state.dashboard_charts_categories = None
+    st.session_state.dashboard_charts_top_n = None
+    st.session_state.dashboard_charts_relationships_heatmap = None
+    st.session_state.dashboard_charts_relationships_scatter = None
+    st.session_state.dashboard_relationships_generated = False
+    st.session_state.dashboard_charts = None
+
+
+def _dashboard_cache_key(tab_name: str) -> str:
+    """Return the session-state key for a given tab's chart cache."""
+    return f"dashboard_charts_{tab_name}"
+
+
+def _get_cached_charts(
+    tab_name: str,
+    df: pd.DataFrame,
+    generator_fn: Callable[[pd.DataFrame], Any],
+    force: bool = False,
+) -> Any:
+    """
+    Retrieve cached charts for a tab if the data version matches.
+    Otherwise, generate via *generator_fn*, cache, and return.
+    """
+    cache_key = _dashboard_cache_key(tab_name)
+    current_version = st.session_state.get("dashboard_cache_version", 0)
+    cached = st.session_state.get(cache_key)
+
+    if (
+        not force
+        and cached is not None
+        and isinstance(cached, dict)
+        and cached.get("version") == current_version
+    ):
+        return cached["charts"]
+
+    charts = generator_fn(df)
+    st.session_state[cache_key] = {"version": current_version, "charts": charts}
+    return charts
 
 
 def _refresh_dataset_state(df: pd.DataFrame) -> None:
@@ -138,6 +197,9 @@ def _refresh_dataset_state(df: pd.DataFrame) -> None:
         metadata["column_count"] = len(df.columns)
         metadata["column_names"] = [str(col) for col in df.columns]
         st.session_state.file_metadata = metadata
+
+    # Invalidate dashboard caches whenever the dataset changes
+    _invalidate_dashboard_cache()
 
 
 def _apply_cleaning_operation(
@@ -272,6 +334,7 @@ def _process_upload(uploaded_file) -> None:
         st.session_state.copilot_last_response = None
         st.session_state.copilot_executive_summary = None
         st.session_state.copilot_suggestions = None
+        _invalidate_dashboard_cache()
 
         log_action(
             action="File Upload",
@@ -800,6 +863,8 @@ def _render_export_button() -> None:
             )
 
             log_action(action="Export Workbook", details=f"Exported '{filename}'", affected_rows=len(df))
+
+
 def render_dashboard_analytics_center() -> None:
     """Dashboard Analytics Center with Plotly visualizations."""
     st.subheader("Dashboard Analytics Center")
@@ -815,13 +880,12 @@ def render_dashboard_analytics_center() -> None:
         if st.button("Generate Dashboard", type="primary", use_container_width=True):
             with st.spinner("Building visualizations..."):
                 try:
-                    all_charts = generate_all_charts(df)
                     recommendations = recommend_best_charts(df)
-                    st.session_state.dashboard_charts = all_charts
                     st.session_state.dashboard_recommendations = recommendations
+                    _invalidate_dashboard_cache()
                     log_action(
                         action="Generate Dashboard",
-                        details="Generated all dashboard visualizations and chart recommendations.",
+                        details="Activated lazy-loaded dashboard with chart recommendations.",
                         affected_rows=len(df),
                     )
                     st.success("Dashboard generated successfully!")
@@ -839,23 +903,23 @@ def render_dashboard_analytics_center() -> None:
 
     _display_chart_recommendations()
 
-    if st.session_state.get("dashboard_charts"):
+    if st.session_state.get("dashboard_recommendations"):
         tabs = st.tabs(["Overview", "Trends", "Categories", "Relationships", "Advanced Analytics"])
 
         with tabs[0]:
-            _render_overview_tab()
+            _render_overview_tab(df)
 
         with tabs[1]:
-            _render_trends_tab()
+            _render_trends_tab(df)
 
         with tabs[2]:
-            _render_categories_tab()
+            _render_categories_tab(df)
 
         with tabs[3]:
-            _render_relationships_tab()
+            _render_relationships_tab(df)
 
         with tabs[4]:
-            _render_advanced_analytics_tab()
+            _render_advanced_analytics_tab(df)
 
 
 def _display_chart_recommendations() -> None:
@@ -896,96 +960,110 @@ def _render_chart_group(chart_results: list, max_per_row: int = 2) -> None:
                 st.caption(chart.description)
 
 
-def _render_overview_tab() -> None:
+def _render_overview_tab(df: pd.DataFrame) -> None:
     """Overview tab: numeric summaries and KPI visualizations."""
     st.markdown("### 📊 Overview")
     st.markdown("Numeric summaries, averages, and key metric visualizations.")
 
-    charts = st.session_state.dashboard_charts
-    if charts:
-        _render_chart_group(charts.get("numeric_summary", []), max_per_row=2)
+    with st.spinner("Loading overview..."):
+        charts = _get_cached_charts("overview", df, generate_overview_charts)
+    _render_chart_group(charts, max_per_row=2)
 
-        df = st.session_state.dataframe
-        if df is not None:
-            col_types = detect_column_types(df)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Numeric Columns", len(col_types["numeric"]))
-            c2.metric("Categorical Columns", len(col_types["categorical"]))
-            c3.metric("Date Columns", len(col_types["date"]))
-            c4.metric("Total Columns", len(col_types["all"]))
+    col_types = detect_column_types(df)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Numeric Columns", len(col_types["numeric"]))
+    c2.metric("Categorical Columns", len(col_types["categorical"]))
+    c3.metric("Date Columns", len(col_types["date"]))
+    c4.metric("Total Columns", len(col_types["all"]))
 
 
-def _render_trends_tab() -> None:
+def _render_trends_tab(df: pd.DataFrame) -> None:
     """Trends tab: distribution analysis and time series."""
     st.markdown("### 📈 Trends & Distributions")
     st.markdown("Histograms, box plots, and temporal trend analysis.")
 
-    charts = st.session_state.dashboard_charts
-    if charts:
-        _render_chart_group(charts.get("distribution", []), max_per_row=2)
+    with st.spinner("Loading distributions..."):
+        charts = _get_cached_charts("trends", df, generate_trends_charts)
+    _render_chart_group(charts, max_per_row=2)
 
-        numeric_summary = charts.get("numeric_summary", [])
-        trend_charts = [c for c in numeric_summary if c.chart_type == "line"]
-        if trend_charts:
-            st.markdown("#### Time Series Trends")
-            _render_chart_group(trend_charts, max_per_row=2)
+    with st.spinner("Loading time series..."):
+        overview_charts = _get_cached_charts("overview", df, generate_overview_charts)
+    trend_charts = [c for c in overview_charts if c.chart_type == "line"]
+    if trend_charts:
+        st.markdown("#### Time Series Trends")
+        _render_chart_group(trend_charts, max_per_row=2)
 
 
-def _render_categories_tab() -> None:
+def _render_categories_tab(df: pd.DataFrame) -> None:
     """Categories tab: pie charts and bar charts for categorical data."""
     st.markdown("### 🗂️ Category Analysis")
     st.markdown("Composition and frequency analysis of categorical columns.")
 
-    charts = st.session_state.dashboard_charts
-    if charts:
-        _render_chart_group(charts.get("categorical", []), max_per_row=2)
+    with st.spinner("Loading category charts..."):
+        cat_charts = _get_cached_charts("categories", df, generate_categorical_summary_charts)
+    _render_chart_group(cat_charts, max_per_row=2)
 
-        top_n = charts.get("top_n", [])
-        if top_n and any(c.applicable for c in top_n):
-            st.markdown("#### Top-N Rankings")
-            _render_chart_group(top_n, max_per_row=2)
+    with st.spinner("Loading top-N rankings..."):
+        top_n = _get_cached_charts("top_n", df, generate_top_n_charts)
+    if top_n and any(c.applicable for c in top_n):
+        st.markdown("#### Top-N Rankings")
+        _render_chart_group(top_n, max_per_row=2)
 
 
-def _render_relationships_tab() -> None:
+def _render_relationships_tab(df: pd.DataFrame) -> None:
     """Relationships tab: scatter plots and correlation heatmap."""
     st.markdown("### 🔗 Relationships")
     st.markdown("Correlation analysis and scatter plot exploration.")
 
-    charts = st.session_state.dashboard_charts
-    if charts:
-        relationships = charts.get("relationships", [])
+    n_rows = len(df)
+    is_large = n_rows > 10000
 
-        heatmaps = [c for c in relationships if c.chart_type == "heatmap"]
-        if heatmaps:
-            st.markdown("#### Correlation Matrix")
-            for hm in heatmaps:
-                if hm.applicable:
-                    st.plotly_chart(hm.figure, use_container_width=True, key="corr_heatmap")
-                    st.caption(hm.description)
-                else:
-                    st.warning(hm.description)
+    # For large datasets, require explicit user opt-in to avoid blocking
+    if is_large and not st.session_state.get("dashboard_relationships_generated", False):
+        st.info(
+            f"📊 **Performance Mode Active**\n\n"
+            f"Your dataset has **{n_rows:,} rows**. To keep the dashboard responsive, "
+            f"relationship visualizations are generated on-demand.\n\n"
+            f"Click below to build the correlation heatmap and scatter plots."
+        )
+        if st.button("🔍 Generate Relationship Analysis", key="btn_gen_relationships", use_container_width=True):
+            st.session_state.dashboard_relationships_generated = True
+            # Pre-warm cache so charts appear instantly on rerun
+            with st.spinner("Preparing relationship analysis..."):
+                _get_cached_charts("relationships_heatmap", df, generate_correlation_heatmap, force=True)
+                _get_cached_charts("relationships_scatter", df, generate_scatter_plots, force=True)
+            st.rerun()
+        return
 
-        scatters = [c for c in relationships if c.chart_type == "scatter"]
-        if scatters:
-            st.markdown("#### Scatter Plots")
-            _render_chart_group(scatters, max_per_row=2)
+    with st.spinner("Loading correlation matrix..."):
+        hm = _get_cached_charts("relationships_heatmap", df, generate_correlation_heatmap)
+    st.markdown("#### Correlation Matrix")
+    if hm.applicable:
+        st.plotly_chart(hm.figure, use_container_width=True, key="corr_heatmap")
+        st.caption(hm.description)
+    else:
+        st.warning(hm.description)
+
+    with st.spinner("Loading scatter plots..."):
+        scatters = _get_cached_charts("relationships_scatter", df, generate_scatter_plots)
+    if scatters and any(c.applicable for c in scatters):
+        st.markdown("#### Scatter Plots")
+        _render_chart_group(scatters, max_per_row=2)
 
 
-def _render_advanced_analytics_tab() -> None:
+def _render_advanced_analytics_tab(df: pd.DataFrame) -> None:
     """Advanced Analytics tab: comprehensive view and raw data."""
     st.markdown("### 🔬 Advanced Analytics")
     st.markdown("Complete visualization suite and column type breakdown.")
-
-    df = st.session_state.dataframe
-    if df is None:
-        return
 
     st.markdown("#### Column Type Detection")
     try:
         col_types = detect_column_types(df)
         type_data = []
+
         for col in df.columns:
             detected = "other"
+
             if col in col_types["numeric"]:
                 detected = "numeric"
             elif col in col_types["categorical"]:
@@ -994,39 +1072,129 @@ def _render_advanced_analytics_tab() -> None:
                 detected = "date"
             elif col in col_types["boolean"]:
                 detected = "boolean"
-            type_data.append({
-                "Column": col,
-                "Detected Type": detected,
-                "Actual Dtype": str(df[col].dtype),
-                "Non-Null Count": int(df[col].notna().sum()),
-                "Null Count": int(df[col].isna().sum()),
-                "Unique Values": int(df[col].nunique()),
-            })
-        st.dataframe(pd.DataFrame(type_data), use_container_width=True, hide_index=True)
+
+            type_data.append(
+                {
+                    "Column": col,
+                    "Detected Type": detected,
+                    "Actual Dtype": str(df[col].dtype),
+                    "Non-Null Count": int(df[col].notna().sum()),
+                    "Null Count": int(df[col].isna().sum()),
+                    "Unique Values": int(df[col].nunique()),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(type_data),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     except Exception as exc:
         st.warning(f"Could not generate column type breakdown: {exc}")
 
-    charts = st.session_state.dashboard_charts
-    if charts:
-        st.markdown("#### All Generated Charts")
-        all_chart_lists = [
-            charts.get("numeric_summary", []),
-            charts.get("distribution", []),
-            charts.get("categorical", []),
-            charts.get("relationships", []),
-            charts.get("top_n", []),
-        ]
-        all_applicable = []
-        for chart_list in all_chart_lists:
-            all_applicable.extend([c for c in chart_list if c.applicable])
+    st.markdown("#### All Generated Charts")
 
-        if all_applicable:
-            for i, chart in enumerate(all_applicable):
-                st.plotly_chart(chart.figure, use_container_width=True, key=f"all_chart_{i}")
-                st.caption(f"**{chart.title}** — {chart.description}")
-                st.divider()
-        else:
-            st.info("No applicable charts were generated for this dataset.")
+    current_version = st.session_state.get("dashboard_cache_version", 0)
+    all_charts = []
+
+    for tab_name in (
+        "overview",
+        "trends",
+        "categories",
+        "relationships_heatmap",
+        "relationships_scatter",
+    ):
+        cache_key = _dashboard_cache_key(tab_name)
+        cached = st.session_state.get(cache_key)
+
+        if (
+            cached
+            and isinstance(cached, dict)
+            and cached.get("version") == current_version
+        ):
+            charts = cached.get("charts")
+
+            if isinstance(charts, list):
+                all_charts.extend(
+                    [
+                        c
+                        for c in charts
+                        if getattr(c, "applicable", True)
+                    ]
+                )
+
+            elif charts is not None:
+                if getattr(charts, "applicable", True):
+                    all_charts.append(charts)
+
+    if all_charts:
+        for i, chart in enumerate(all_charts):
+            st.plotly_chart(
+                chart.figure,
+                use_container_width=True,
+                key=f"all_chart_{i}",
+            )
+            st.caption(f"**{chart.title}** — {chart.description}")
+            st.divider()
+
+    else:
+        st.info(
+            "No charts cached yet. Visit the Overview, Trends, Categories, "
+            "or Relationships tabs to generate charts first."
+        )
+
+        if st.button(
+            "⚡ Force Load All Charts",
+            key="btn_advanced_load_all",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                "Building all visualizations… This may take a moment."
+            ):
+                _get_cached_charts(
+                    "overview",
+                    df,
+                    generate_overview_charts,
+                    force=True,
+                )
+
+                _get_cached_charts(
+                    "trends",
+                    df,
+                    generate_trends_charts,
+                    force=True,
+                )
+
+                _get_cached_charts(
+                    "categories",
+                    df,
+                    generate_categorical_summary_charts,
+                    force=True,
+                )
+
+                _get_cached_charts(
+                    "top_n",
+                    df,
+                    generate_top_n_charts,
+                    force=True,
+                )
+
+                _get_cached_charts(
+                    "relationships_heatmap",
+                    df,
+                    generate_correlation_heatmap,
+                    force=True,
+                )
+
+                _get_cached_charts(
+                    "relationships_scatter",
+                    df,
+                    generate_scatter_plots,
+                    force=True,
+                )
+
+            st.rerun()
 
 
 
